@@ -489,7 +489,7 @@ if __name__ == "__main__":
         # 3. THUẬT TOÁN PEELING (Bóc tách)
         
         # Khởi tạo phần dư (Residual) ban đầu chính là Target
-        residual = normalize_to_unit(target_vector.copy())
+        residual = target_vector.copy()*batch_size
         
         # Mảng đếm số lượng nhãn
         counts = np.zeros(10, dtype=int)
@@ -499,7 +499,7 @@ if __name__ == "__main__":
         for step in range(batch_size):
             # a. Tính điểm tương đồng (Dot Product / Projection)
             # scores[i] = Độ lớn hình chiếu của Residual lên Class i
-            scores = np.dot(Basis.T, residual)
+            scores = np.dot(Basis.T, residual) / np.linalg.norm(residual)
             
             # b. Chọn class có điểm cao nhất (Thằng trùng hướng nhất)
             best_idx = np.argmax(scores)
@@ -632,7 +632,7 @@ if __name__ == "__main__":
     
     total_acc = 0.0  
     # for test_id in range(args.ft_samples // args.unlearn_samples):
-    total_loop = 30
+    total_loop = 20
     for test_id in range(total_loop):
         unlearn_ids = list(range(test_id * args.unlearn_samples, (test_id + 1) * args.unlearn_samples))
         print(f"Unlearn {unlearn_ids}")
@@ -688,9 +688,9 @@ if __name__ == "__main__":
         all_deltas = rs.recovery_algo.loss_steps_each_corrected(model_ft, normalizer(X_unlearn.to(**setup)), y_unlearn.to(setup['device']), lr=1)
         
         for delta in all_deltas:
-            sum_delta += normalize_to_unit(delta[-1].detach().cpu().numpy().flatten()) # Cộng tensor bias của từng ảnh
-            print(normalize_to_unit(delta[-1].detach().cpu().numpy().flatten()))
-        mean_delta = sum_delta / 4
+            sum_delta += delta[-1].detach().cpu().numpy().flatten() # Cộng tensor bias của từng ảnh
+            print(delta[-1].detach().cpu().numpy().flatten())
+        mean_delta = sum_delta / len(all_deltas)
         # print("Delta Batch Gốc:     ", normalize_to_unit(approx_diff[-1].detach().cpu().numpy().flatten()))
         print("Mean Delta Từng Ảnh: ", mean_delta)
         # Chia cho số lượng ảnh
