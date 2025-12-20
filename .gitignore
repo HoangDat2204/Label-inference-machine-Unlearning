@@ -4,4 +4,5 @@ ex1000*
 data
 recovery/nn
 datasets
-recovery/__pycache__
+recovery/
+results/models/resnet18_cifar100_ex10000_s0/model*

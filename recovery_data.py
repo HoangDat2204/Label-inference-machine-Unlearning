@@ -223,7 +223,7 @@ if __name__ == "__main__":
         A = np.stack([normalize_to_unit(g[-1].detach().cpu().numpy().flatten()) for g in representative_gradients], axis=1)
         
         # Cấu hình Lasso: positive=True (tương đương NNLS)
-        # alpha: Hệ số phạt, càng lớn càng ép nhiều số về 0 (cần tinh chỉnh, vd: 0.001 -> 0.15)
+        # alpha: Hệ số phạt, càng lớn càng ép nhiều số về 0 (cần tinh chỉnh, vd: 0.001 -> 0)
         lasso = Lasso(alpha=0.01, positive=True, fit_intercept=False)
         lasso.fit(A, target)
         
@@ -276,8 +276,8 @@ if __name__ == "__main__":
         """
         
         # 1. Trích xuất Bias Gradient của Delta W (Target)
-        # target_raw = approx_diff[-1].detach().cpu().numpy().flatten()
-        target_raw = approx_diff
+        target_raw = approx_diff[-1].detach().cpu().numpy().flatten()
+        # target_raw = approx_diff
         # b = normalize_to_unit(target_raw) # Chuẩn hóa Target
         b = target_raw
 
@@ -285,7 +285,7 @@ if __name__ == "__main__":
         A_columns = []
         for g in representative_gradients:
             bias_grad = g[-1].detach().cpu().numpy().flatten()
-            bias_grad_norm = normalize_to_unit(bias_grad) # Chuẩn hóa Basis
+            bias_grad_norm = bias_grad # Chuẩn hóa Basis
             A_columns.append(bias_grad_norm)
             
         # Tạo ma trận A (Shape: 10x10)
@@ -477,8 +477,7 @@ if __name__ == "__main__":
         basis_vectors = []
         for g in representative_gradients:
             # Lấy bias của từng class
-            bias_grad = g[-1].detach().cpu().numpy().flatten()
-            
+            bias_grad = normalize_to_unit(g[-1].detach().cpu().numpy().flatten())
             # [QUAN TRỌNG] Vector cơ sở PHẢI chuẩn hóa về 1
             # Để tích vô hướng (dot product) phản ánh đúng độ tương đồng (cosine)
             basis_vectors.append(normalize_to_unit(bias_grad))
@@ -489,7 +488,7 @@ if __name__ == "__main__":
         # 3. THUẬT TOÁN PEELING (Bóc tách)
         
         # Khởi tạo phần dư (Residual) ban đầu chính là Target
-        residual = target_vector.copy()*batch_size
+        residual = target_vector.copy()
         
         # Mảng đếm số lượng nhãn
         counts = np.zeros(10, dtype=int)
@@ -499,7 +498,7 @@ if __name__ == "__main__":
         for step in range(batch_size):
             # a. Tính điểm tương đồng (Dot Product / Projection)
             # scores[i] = Độ lớn hình chiếu của Residual lên Class i
-            scores = np.dot(Basis.T, residual) / np.linalg.norm(residual)
+            scores = np.dot(Basis.T, residual) 
             
             # b. Chọn class có điểm cao nhất (Thằng trùng hướng nhất)
             best_idx = np.argmax(scores)
@@ -515,14 +514,285 @@ if __name__ == "__main__":
             # Nếu projection âm (ngược hướng hoàn toàn), có thể là nhiễu hoặc sai số, 
             # nhưng thuật toán tham lam vẫn sẽ trừ đi theo toán học.
             component_to_remove = projection_val * Basis[:, best_idx]
-            
+            print("Score: ", projection_val)
+            print("Vector Class: ", Basis[:, best_idx])
             # Cập nhật phần dư cho vòng lặp sau
             residual = residual - component_to_remove
-            
+            print("residual: ", residual)
+
             # (Debug) Xem nó chọn gì ở từng bước
             # print(f"    Step {step+1}: Chọn Class {best_idx} (Score: {projection_val:.5f})")
 
         return counts
+    
+    def predict_label_distribution_bias_peeling_threshold(approx_diff, representative_gradients, batch_size, threshold=1e-6, max_iter=1000):
+        """
+        Dự đoán phân phối nhãn dùng Bias Gradient + Peeling (Dừng theo Threshold).
+        
+        Logic mới:
+        1. Lặp liên tục để bóc tách năng lượng từ Residual.
+        2. Cộng dồn giá trị chiếu (projection score) vào từng class.
+        3. Dừng khi Residual quá nhỏ (dưới threshold) hoặc vượt quá số vòng lặp an toàn.
+        4. Dùng hàm prepare_and_round để chia tỷ lệ và làm tròn tổng score thu được.
+        """
+
+        # 1. Chuẩn bị Target (Giữ nguyên độ lớn)
+        target_vector = approx_diff[-1].detach().cpu().numpy().flatten()
+    
+            
+        # 2. Chuẩn bị Cơ sở (Basis) - Chuẩn hóa về 1
+        basis_vectors = []
+        for g in representative_gradients:
+            bias_grad = g[-1].detach().cpu().numpy().flatten()
+            basis_vectors.append(normalize_to_unit(bias_grad))
+            
+        # Ma trận Basis [10, 10]
+        Basis = np.stack(basis_vectors, axis=1)
+
+        # 3. THUẬT TOÁN PEELING
+        
+        residual = normalize_to_unit(target_vector.copy())
+        
+        # [THAY ĐỔI] Mảng này giờ chứa số thực (float) để tích lũy trọng số, không phải số nguyên đếm
+        accumulated_scores = np.zeros(10, dtype=float)
+        
+        # Tính Norm ban đầu để làm căn cứ (tùy chọn, để debug)
+        initial_norm = np.linalg.norm(target_vector)
+        
+        # Vòng lặp
+        for step in range(max_iter):
+            # Kiểm tra điều kiện dừng: Nếu độ lớn phần dư nhỏ hơn ngưỡng
+            current_norm = np.linalg.norm(residual)
+            if current_norm < threshold:
+                # print(f"  -> Converged at step {step}. Residual norm: {current_norm:.6f}")
+                break
+                
+            # a. Tính điểm tương đồng
+            scores = np.dot(Basis.T, residual)
+            
+            # b. Chọn class tốt nhất
+            best_idx = np.argmax(scores)
+            projection_val = scores[best_idx]
+            
+            # [QUAN TRỌNG] Nếu projection âm hoặc quá nhỏ, nghĩa là không còn bóc được gì có ý nghĩa
+            # Ta cũng nên dừng để tránh cộng nhiễu hoặc trừ sai hướng
+            if projection_val <= 1e-9:
+                # print(f"  -> Stopped due to non-positive projection at step {step}.")
+                break
+
+            # c. [THAY ĐỔI] Cộng dồn trọng số (Score) thay vì đếm +1
+            accumulated_scores[best_idx] += projection_val
+            
+            # d. Loại bỏ thành phần đó khỏi Residual
+            component_to_remove = projection_val * Basis[:, best_idx]
+            residual = residual - component_to_remove
+            
+        # 4. FINALIZATION: Chuyển đổi Score tích lũy thành Số lượng ảnh (Integer)
+        # Hàm prepare_and_round sẽ lo việc chuẩn hóa tỷ lệ và làm tròn sao cho tổng = batch_size
+        final_counts = prepare_and_round(accumulated_scores, batch_size)
+        
+        return final_counts
+    
+    def predict_label_distribution_cosine_weighted(approx_diff, representative_gradients, batch_size):
+        """
+        Dự đoán phân phối nhãn dựa trên TRỌNG SỐ COSINE.
+        
+        Logic:
+        1. Tổng hợp DeltaW và Gradient mẫu thành các vector đặc trưng (1 chiều).
+        2. Tính Cosine Similarity giữa DeltaW và từng Gradient mẫu.
+        3. Cosine Score chính là "Trọng số thô".
+        4. Loại bỏ các Score âm (ngược hướng).
+        5. Chia tỷ lệ và làm tròn để tổng bằng batch_size.
+        """
+
+        # --- 1. PREPROCESSING: Aggregation (Dùng lại logic Norm -> Sum cột cho sạch nhiễu) ---
+        # Bạn có thể đổi thành .flatten() nếu muốn dùng Bias thuần túy
+        def aggregate_vector(grad_item):
+            # Nếu là Bias (Tensor 1 chiều)
+            if grad_item[-1].dim() == 1: 
+                return grad_item[-1].detach().cpu().numpy().flatten()
+            
+            # Nếu muốn dùng Weights (Tensor 2 chiều [10, 512]) với logic Norm-Sum tối ưu
+            weight_matrix = grad_item[-2].detach().cpu().numpy()
+            # Chuẩn hóa từng cột feature rồi cộng lại (Logic Voting)
+            norm_cols = weight_matrix / (np.linalg.norm(weight_matrix, axis=0, keepdims=True) + 1e-12)
+            return np.sum(norm_cols, axis=1)
+
+        # Lấy vector Target (Delta W)
+        target_raw = aggregate_vector(approx_diff)
+        # [QUAN TRỌNG] Target phải chuẩn hóa để tính Cosine
+        target_vec = normalize_to_unit(target_raw)
+
+        # Lấy vector Basis (Gradient đại diện)
+        basis_vectors = []
+        for g in representative_gradients:
+            vec = aggregate_vector(g)
+            basis_vectors.append(normalize_to_unit(vec))
+        
+        # Ma trận Basis [10, 10] (hoặc kích thước vector tương ứng)
+        Basis = np.stack(basis_vectors, axis=1)
+
+        # --- 2. TÍNH COSINE SIMILARITY ---
+        # Công thức: Cosine = A . B (khi cả 2 đã là unit vector)
+        # Kết quả: Mảng 10 phần tử, giá trị từ -1 đến 1
+        cosine_scores = np.dot(Basis.T, target_vec)
+
+        # --- 3. XỬ LÝ TRỌNG SỐ ---
+        
+        # a. ReLU (Rectified Linear Unit): Loại bỏ giá trị âm
+        # Nếu cosine < 0 nghĩa là vector tổng đang ngược hướng với class đó -> Không thể có class đó
+        raw_weights = np.maximum(cosine_scores, 0.0)
+        
+        # b. (Tùy chọn) Làm mềm hoặc làm cứng phân phối
+        # Nếu muốn nhấn mạnh các class có cosine lớn, bạn có thể mũ phương lên
+        # raw_weights = raw_weights ** 2 
+
+        # --- 4. LÀM TRÒN (ROUNDING) ---
+        # Sử dụng hàm làm tròn bảo toàn tổng (Largest Remainder Method)
+        
+        final_counts = prepare_and_round(raw_weights, batch_size)
+        
+        return final_counts
+    
+    def predict_label_distribution_peeling_angle_stop(approx_diff, representative_gradients, batch_size, angle_threshold=1, dominance_threshold=0.02):
+        """
+        Dự đoán phân phối nhãn dùng Peeling + Dừng dựa trên Góc (Angle Stop) + Hồi phục mẫu thiếu.
+        
+        Logic:
+        1. Bóc tách từng bước.
+        2. Sau khi trừ, so sánh hướng vector Residual cũ và mới.
+        3. Nếu Cosine Similarity > angle_threshold (hướng không đổi) -> DỪNG.
+        4. Nếu số lượng tìm được < batch_size -> Dò lại lịch sử Score để điền nốt.
+        (Nguyên tắc: Chọn các lần bóc tách có sự chênh lệch (dominance) lớn nhất).
+        """
+
+        # --- 1. PREPROCESSING ---
+        target_vector = approx_diff[-1].detach().cpu().numpy().flatten()
+            
+        basis_vectors = []
+        for g in representative_gradients:
+            bias_grad = g[-1].detach().cpu().numpy().flatten()
+            # Basis chuẩn hóa
+            basis_vectors.append(normalize_to_unit(bias_grad))
+            
+        Basis = np.stack(basis_vectors, axis=1)
+
+        # --- 2. PEELING LOOP ---
+        
+        residual = target_vector.copy()
+        counts = np.zeros(10, dtype=int)
+        
+        # Lưu lịch sử để dùng cho bước điền bù
+        # Mỗi phần tử lưu: (step_index, best_class_idx, gap_score, full_scores)
+        history_logs = []
+        
+        print(f"--- Bắt đầu Peeling (Max {batch_size} steps) ---")
+        cos_sim = 0
+        print(Basis)
+        for step in range(batch_size):
+            # a. Tính Scores
+            scores = np.dot(Basis.T, residual)
+            
+            # b. Tìm Best Class
+            sorted_indices = np.argsort(scores)
+            best_idx = sorted_indices[-1]      # Class điểm cao nhất
+            second_best_idx = sorted_indices[-2] # Class điểm nhì
+            
+            projection_val = scores[best_idx]
+            gap = scores[best_idx] - scores[second_best_idx] # Độ chênh lệch
+            
+            # Lưu lại lịch sử
+            history_logs.append({
+                'step': step,
+                'best_idx': best_idx,
+                'gap': gap,
+                'scores': scores
+            })
+            
+            # c. Update Count tạm thời
+            counts[best_idx] += 1
+            
+            # d. Tính Residual mới
+            component_to_remove = projection_val * Basis[:, best_idx]
+            residual_new = residual - component_to_remove
+            
+            # [LOGIC MỚI] e. Kiểm tra góc dừng (Angle Stop Condition)
+            # Tính Cosine giữa Residual Cũ và Mới
+            norm_old = np.linalg.norm(residual)
+            norm_new = np.linalg.norm(residual_new)
+            
+            # Tránh chia cho 0
+            if norm_old < 1e-9 or norm_new < 1e-9:
+                print(f"  -> Dừng tại bước {step}: Residual đã về 0.")
+                break
+                
+            if cos_sim > angle_threshold:
+                print(f"  -> Dừng sớm tại bước {step}: Hướng thay đổi không đáng kể (Cos={cos_sim:.6f}).")
+                # [QUAN TRỌNG] Hoàn tác bước cộng count vừa rồi vì bước này được coi là vô nghĩa
+                counts[best_idx] -= 1 
+                break
+            
+            
+            dot_prod = np.dot(residual, residual_new)
+            cos_sim = dot_prod / (norm_old * norm_new)
+            
+            print("Cos_sim: ",cos_sim /np.linalg.norm(residual_new) )
+            print(residual_new)
+            print(scores)
+            print(Basis[:, best_idx])
+
+            # Clip giá trị cos trong [-1, 1] để tránh lỗi số học
+            cos_sim = np.clip(cos_sim, -1.0, 1.0)
+            
+            # print(f"  Step {step}: Class {best_idx} | Score {projection_val:.4f} | Cos Change: {cos_sim:.6f}")
+            
+            # Nếu cos quá gần 1 (góc ~ 0 độ) -> Việc trừ không thay đổi hướng -> Dừng
+            
+                
+            # Cập nhật residual thật
+            residual = residual_new
+
+        # --- 3. RECOVERY PHASE (Điền bù mẫu thiếu) ---
+        
+        current_total = np.sum(counts)
+        missing = batch_size - current_total
+        
+        if missing > 0:
+            print(f"  -> Còn thiếu {missing} mẫu. Tiến hành dò lại lịch sử...")
+            
+            # Duyệt lại lịch sử từ đầu (step 0, 1, 2...)
+            for log in history_logs:
+                if missing == 0:
+                    break
+                    
+                idx = log['best_idx']
+                gap = log['gap']
+                
+                # Kiểm tra độ chênh lệch (Dominance)
+                # Nếu sự chênh lệch giữa Top 1 và Top 2 đủ lớn -> Đây là một dự đoán chắc chắn
+                # Ta có thể tự tin gán thêm sample vào class này
+                if gap > dominance_threshold:
+                    print(f"    + Bù 1 mẫu vào Class {idx} (Do Gap lớn: {gap:.4f})")
+                    counts[idx] += 1
+                    missing -= 1
+                else:
+                    pass 
+                    # print(f"    - Bỏ qua step {log['step']} (Gap quá nhỏ: {gap:.4f})")
+
+            # Nếu chạy hết lịch sử mà vẫn còn thiếu (trường hợp hiếm)
+            # Gán nốt vào class có tổng điểm tích lũy cao nhất (Fallback)
+            if missing > 0:
+                print(f"  -> Vẫn thiếu {missing} mẫu. Gán vào class có điểm tích lũy cao nhất.")
+                # Tính tổng score của các step đã qua
+                total_scores = np.zeros(10)
+                for log in history_logs:
+                    total_scores += log['scores']
+                
+                top_class = np.argmax(total_scores)
+                counts[top_class] += missing
+
+        return counts
+    
     # --------------------------------------------------------------------------
     # PHẦN MỚI: TÍNH GRADIENT ĐẠI DIỆN TỪ PROBING SAMPLES (CIFAR-10)
     # --------------------------------------------------------------------------
@@ -592,18 +862,17 @@ if __name__ == "__main__":
         grads_cpu = tuple(g.detach().cpu() for g in grads)
         
         class_representative_gradients.append(grads_cpu)
-
     print(f"[SUCCESS] Đã tính xong Gradient đại diện cho {len(class_representative_gradients)} lớp.")
-    my_custom_vector_plane =    torch.tensor([-1.0 , 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15])
-    my_custom_vector_car =      torch.tensor([ 0.15, -1.0, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15])
-    my_custom_vector_bird =     torch.tensor([ 0.15, 0.15, -1.0, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15])
-    my_custom_vector_cat =      torch.tensor([ 0.15, 0.15, 0.15, -1.0, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15])
-    my_custom_vector_deer =     torch.tensor([ 0.15, 0.15, 0.15, 0.15, -1.0, 0.15, 0.15, 0.15, 0.15, 0.15])
-    my_custom_vector_dog =      torch.tensor([ 0.15, 0.15, 0.15, 0.15, 0.15, -1.0, 0.15, 0.15, 0.15, 0.15])
-    my_custom_vector_frog =     torch.tensor([ 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, -1.0, 0.15, 0.15, 0.15])
-    my_custom_vector_horse=     torch.tensor([ 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, -1.0, 0.15, 0.15])
-    my_custom_vector_ship =     torch.tensor([ 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, -1.0, 0.15])
-    my_custom_vector_truck =    torch.tensor([ 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15, -1.0])
+    my_custom_vector_plane =    torch.tensor([-1.0 , 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05])
+    my_custom_vector_car =      torch.tensor([ 0.05, -1.0, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05])
+    my_custom_vector_bird =     torch.tensor([ 0.05, 0.05, -1.0, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05])
+    my_custom_vector_cat =      torch.tensor([ 0.05, 0.05,  0.05, -1.0, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05])
+    my_custom_vector_deer =     torch.tensor([ 0.05, 0.05,  0.05, 0.05, -1.0, 0.05, 0.05, 0.05, 0.05, 0.05])
+    my_custom_vector_dog =      torch.tensor([ 0.05, 0.05,  0.05, 0.05, 0.05,-1.0, 0.05, 0.05, 0.05, 0.05])
+    my_custom_vector_frog =     torch.tensor([ 0.05, 0.05,  0.05, 0.05, 0.05, 0.05,-1.0, 0.05, 0.05, 0.05])
+    my_custom_vector_horse=     torch.tensor([ 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05,-1.0,  0.05, 0.05])
+    my_custom_vector_ship =     torch.tensor([ 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, -1.0, 0.05])
+    my_custom_vector_truck =    torch.tensor([ 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, 0.05, -1.0,])
     class_representative_gradients[0][-1].data = my_custom_vector_plane
     class_representative_gradients[1][-1].data = my_custom_vector_car
     class_representative_gradients[2][-1].data = my_custom_vector_bird
@@ -629,11 +898,12 @@ if __name__ == "__main__":
     model_pretrain.zero_grad()
     model_pretrain.to(**setup)
     rec_machine_pretrain = rs.GradientReconstructor(model_pretrain, (dm, ds), recons_config, num_images=args.unlearn_samples)
-    
+    np.set_printoptions(formatter={'float_kind': lambda x: f"{x:.5e}\t"})
+
     total_acc = 0.0  
     # for test_id in range(args.ft_samples // args.unlearn_samples):
-    total_loop = 20
-    for test_id in range(total_loop):
+    total_loop = 150
+    for test_id in range(20):
         unlearn_ids = list(range(test_id * args.unlearn_samples, (test_id + 1) * args.unlearn_samples))
         print(f"Unlearn {unlearn_ids}")
         unlearn_folder = os.path.join(save_folder, f'unlearn_ft_batch{test_id}')
@@ -684,12 +954,22 @@ if __name__ == "__main__":
         # process_recons_results(result_exact, X_unlearn, figpath=figure_folder, recons_path=recons_folder, filename=f'exact{test_id}_{index[test_id].item()}')
 
         approx_diff = [p.detach().to(**setup) for p in rs.recovery_algo.loss_steps(model_ft, normalizer(X_unlearn.to(**setup)), y_unlearn.to(setup['device']), lr=1, local_steps=1)] # lr is not important in cosine 
+        weights_after =  [p.detach().to(**setup) for p in rs.recovery_algo.weights_after(model_ft, normalizer(X_unlearn.to(**setup)), y_unlearn.to(setup['device']), lr=1, local_steps=1)] # lr is not important in cosine 
+        delta_W  = approx_diff[-2]
+        new_W = weights_after[-2]
+        dot_product_vector = torch.sum(delta_W * new_W, dim=1)
+        result_10_elements = dot_product_vector.detach().cpu().numpy()
+        print("Vector kết quả (10 phần tử):")
+        print(result_10_elements)
+        print(f"Shape gốc: {delta_W.shape}") # Nên là torch.Size([10, 512])
+        print(f"Shape kết quả: {result_10_elements.shape}") # Nên là (10,)
         sum_delta = 0
         all_deltas = rs.recovery_algo.loss_steps_each_corrected(model_ft, normalizer(X_unlearn.to(**setup)), y_unlearn.to(setup['device']), lr=1)
         
         for delta in all_deltas:
-            sum_delta += delta[-1].detach().cpu().numpy().flatten() # Cộng tensor bias của từng ảnh
-            print(delta[-1].detach().cpu().numpy().flatten())
+            vector =   delta[-1].detach().cpu().numpy().flatten() 
+            sum_delta += vector# Cộng tensor bias của từng ảnh
+            print(vector)
         mean_delta = sum_delta / len(all_deltas)
         # print("Delta Batch Gốc:     ", normalize_to_unit(approx_diff[-1].detach().cpu().numpy().flatten()))
         print("Mean Delta Từng Ảnh: ", mean_delta)

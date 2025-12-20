@@ -462,7 +462,47 @@ def loss_steps(model, inputs, labels, loss_fn=torch.nn.CrossEntropyLoss(), lr=1e
                                             in zip(patched_model.nparameters.items(), patched_model_origin.nparameters.items()))
     return list(patched_model.nparameters.values())
 
+def weights_after(model, inputs, labels, loss_fn=torch.nn.CrossEntropyLoss(), lr=1e-4, local_steps=4, batch_size=0):
+    """
+    Take a few gradient descent steps to fit the model to the given input.
+    Returns: (delta_w, w_unlearned)
+    """
+    patched_model = MetaMonkey(model)
+    
+    # Lưu lại trạng thái ban đầu để tính delta sau này
+    patched_model_origin = deepcopy(patched_model)
+    
+    # Vòng lặp Gradient Ascent (Unlearning)
+    for i in range(local_steps):
+        if batch_size == 0:
+            outputs = patched_model(inputs, patched_model.nparameters)
+            labels_ = labels
+        else:
+            idx = i % (inputs.shape[0] // batch_size)
+            outputs = patched_model(inputs[idx * batch_size:(idx + 1) * batch_size], patched_model.nparameters)
+            labels_ = labels[idx * batch_size:(idx + 1) * batch_size]
+            
+        loss = loss_fn(outputs, labels_).sum()
+        
+        # Tính gradient
+        grad = torch.autograd.grad(loss, patched_model.nparameters.values(),
+                                   retain_graph=True, create_graph=True, only_inputs=True)
 
+        # Cập nhật trọng số (Gradient Ascent: param + lr * grad)
+        patched_model.nparameters = OrderedDict((name, param + lr * grad_part)
+                                               for ((name, param), grad_part)
+                                               in zip(patched_model.nparameters.items(), grad))
+
+    # --- SỬA ĐỔI TẠI ĐÂY ---
+    
+    # 1. Lấy W sau khi unlearn (Weights hiện tại của patched_model)
+    unlearned_params = patched_model.nparameters
+    
+    # 2. Tính Delta W (W_unlearned - W_origin)
+    # Lưu vào biến riêng chứ không ghi đè lên patched_model.nparameters ngay
+    
+    # Trả về cả hai dưới dạng list các values
+    return list(patched_model.nparameters.values())
 
 
 
